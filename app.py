@@ -1,16 +1,16 @@
-from flask import Flask, render_template, request
+from flask import Flask, request, render_template
 
 app = Flask(__name__)
 
 @app.route('/')
-def index():
+def home():
     return render_template('index.html')
 
 @app.route('/detect', methods=['POST'])
-def detect_landing_spot():
-    # Logic for detecting landing spots will go here
-    # For now, just returning a placeholder response
-    return "Landing spot detection logic to be implemented."
+def detect():
+    # Implement detection logic here
+    landing_spot = request.form['landing_spot']
+    return f'Detected landing spot: {landing_spot}'
 
 if __name__ == '__main__':
     app.run(debug=True)
