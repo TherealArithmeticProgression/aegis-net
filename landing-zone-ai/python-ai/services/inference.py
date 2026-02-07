@@ -54,8 +54,9 @@ class InferenceService:
         # Let's use the mean of the confidence map for the global score.
         global_score = float(np.mean(confidence_map))
         
-        # Generate Heatmap Image (Visualizing Mean Prediction)
-        heatmap_path = generate_heatmap(mean_pred) # You need to implement/update this to handle numpy array
+        # Generate Heatmap Image with overlay
+        # Pass variance and original image for RGB overlay
+        heatmap_path = generate_heatmap(mean_pred, variance, image_file)
         
         return {
             "score": global_score,
@@ -65,3 +66,45 @@ class InferenceService:
                 "max_confidence": float(np.max(confidence_map)),
             }
         }
+
+    def predict_simple(self, image_file):
+        """
+        Single forward pass inference (faster, no uncertainty).
+        
+        Pipeline:
+        1. Input Image → Preprocess (resize, normalize)
+        2. Forward Pass → Segmentation Head (U-Net) → Raw Logits
+        3. Sigmoid → Pixel-wise Probabilities (0-1)
+        4. Generate Heatmap Visualization
+        
+        Returns:
+            - heatmapUrl: path to saved heatmap
+            - score: mean probability (confidence)
+            - probability_map: raw numpy array of probabilities
+        """
+        # 1. Preprocess input image
+        input_tensor = preprocess_image(image_file)  # Shape: (1, 3, 256, 256)
+        
+        # 2. Forward pass through segmentation head
+        self.model.eval()  # Disable dropout for deterministic output
+        with torch.no_grad():
+            logits = self.model(input_tensor)  # Shape: (1, 1, 256, 256)
+            
+            # 3. Apply sigmoid for pixel-wise probabilities
+            probabilities = torch.sigmoid(logits)  # Range: 0.0 - 1.0
+        
+        # Convert to numpy for visualization
+        prob_map = probabilities.cpu().numpy()[0, 0]  # Shape: (256, 256)
+        
+        # 4. Generate heatmap from probability map
+        heatmap_path = generate_heatmap(prob_map)
+        
+        # Calculate global confidence score (mean of all probabilities)
+        global_score = float(np.mean(prob_map))
+        
+        return {
+            "score": global_score,
+            "heatmapUrl": heatmap_path,
+            "probability_map": prob_map  # Raw array if needed for further processing
+        }
+
