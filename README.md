@@ -54,12 +54,10 @@ This project uses the **WildUAV dataset**, a large-scale benchmark for monocular
 
 <div align="center">
 
-| RGB Image | Depth Map | Segmentation |
-|:---------:|:---------:|:------------:|
-| ![Sample 1](docs/assets/sample_rgb_1.png) | ![Depth 1](docs/assets/sample_depth_1.png) | ![Seg 1](docs/assets/sample_seg_1.png) |
-| *Forest terrain - seq07* | *LiDAR depth* | *Safe zone overlay* |
-| ![Sample 2](docs/assets/sample_rgb_2.png) | ![Depth 2](docs/assets/sample_depth_2.png) | ![Seg 2](docs/assets/sample_seg_2.png) |
-| *Open grassland - seq12* | *LiDAR depth* | *Safe zone overlay* |
+| Forest Scene | Open Terrain Scene |
+|:------------:|:------------------:|
+| ![Forest](docs/assets/0004.gif) | ![Open](docs/assets/0130.gif) |
+| *Diverse terrain handling* | *Real-time segmentation* |
 
 </div>
 
