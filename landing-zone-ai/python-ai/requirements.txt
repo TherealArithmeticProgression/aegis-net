@@ -8,4 +8,5 @@ matplotlib==3.8.0
 gradio==4.0.0
 tqdm==4.66.0
 ultralytics==8.0.200
+scikit-image==0.22.0
 

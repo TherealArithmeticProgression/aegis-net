@@ -1,28 +1,82 @@
 import os
 import torch
 import numpy as np
+import cv2
+from PIL import Image
 from .preprocessing import preprocess_image
 from .heatmap import generate_heatmap
 from config import Config
 from models.yolov8_landing import YOLOv8LandingZone, YOLOv8SegmentationWrapper
 
-class InferenceService:
-    def __init__(self, use_wrapper=True):
+
+class TTAAugmentor:
+    """
+    Test-Time Augmentation for uncertainty estimation.
+    Runs inference on flipped and scaled versions of the image.
+    """
+    def __init__(self, scales=[0.75, 1.0, 1.25], flips=[False, True]):
+        self.scales = scales
+        self.flips = flips
+    
+    def generate_augmented_images(self, image):
         """
-        Initialize inference service.
+        Generate augmented versions of the image.
         
         Args:
-            use_wrapper: If True, use YOLO's built-in segmentation (simpler).
-                        If False, use custom YOLOv8LandingZone model.
+            image: numpy array (H, W, 3)
+        
+        Returns:
+            List of (augmented_image, reverse_transform_fn) tuples
         """
+        augmented = []
+        original_size = (image.shape[1], image.shape[0])  # (W, H)
+        
+        for scale in self.scales:
+            for flip in self.flips:
+                aug_img = image.copy()
+                
+                # Scale
+                if scale != 1.0:
+                    new_size = (int(original_size[0] * scale), int(original_size[1] * scale))
+                    aug_img = cv2.resize(aug_img, new_size, interpolation=cv2.INTER_LINEAR)
+                
+                # Horizontal flip
+                if flip:
+                    aug_img = cv2.flip(aug_img, 1)
+                
+                # Store with reverse transform info
+                augmented.append({
+                    'image': aug_img,
+                    'scale': scale,
+                    'flipped': flip,
+                    'original_size': original_size
+                })
+        
+        return augmented
+    
+    def reverse_transform(self, prediction, scale, flipped, original_size):
+        """
+        Reverse the augmentation on the prediction.
+        """
+        # Reverse flip
+        if flipped:
+            prediction = cv2.flip(prediction, 1)
+        
+        # Reverse scale (resize back to original)
+        prediction = cv2.resize(prediction, original_size, interpolation=cv2.INTER_LINEAR)
+        
+        return prediction
+
+
+class InferenceService:
+    def __init__(self, use_wrapper=True):
         self.use_wrapper = use_wrapper
+        self.tta = TTAAugmentor()
         
         if use_wrapper:
-            # Use YOLOv8 segmentation directly
             self.model = YOLOv8SegmentationWrapper()
             print("YOLOv8 Segmentation Wrapper loaded.")
         else:
-            # Use custom model with trained weights
             self.model = YOLOv8LandingZone(pretrained=True)
             model_path = Config.MODEL_PATH.replace('landing_model.pth', 'yolo_landing.pth')
             if os.path.exists(model_path):
@@ -32,14 +86,13 @@ class InferenceService:
                 print("Warning: Custom weights not found, using pretrained.")
             self.model.eval()
 
-    def predict(self, image_file, mc_samples=10):
+    def predict(self, image_file, use_tta=True):
         """
-        Runs inference with uncertainty estimation.
-        Works with both YOLOv8 wrapper and custom model.
-        """
-        from PIL import Image
-        import cv2
+        Runs inference with Test-Time Augmentation (TTA) for uncertainty estimation.
         
+        Instead of MC Dropout, we run inference on flipped and scaled versions.
+        Uncertainty = variance across augmented predictions.
+        """
         # Load image
         if isinstance(image_file, str):
             image = cv2.imread(image_file)
@@ -49,24 +102,47 @@ class InferenceService:
         else:
             image = np.array(image_file)
         
-        if self.use_wrapper:
-            # Use YOLO wrapper's built-in uncertainty
-            mean_pred, variance = self.model.predict_with_uncertainty(image, n_passes=mc_samples)
-        else:
-            # Use custom model with MC Dropout
-            input_tensor = preprocess_image(image_file)
+        if use_tta:
+            # Generate augmented versions
+            augmented_images = self.tta.generate_augmented_images(image)
             predictions = []
-            self.model.train()  # Enable Dropout
             
-            with torch.no_grad():
-                for _ in range(mc_samples):
-                    output = self.model(input_tensor)
-                    output = torch.sigmoid(output)
-                    predictions.append(output.cpu().numpy())
+            for aug_data in augmented_images:
+                # Run prediction on augmented image
+                if self.use_wrapper:
+                    pred = self.model.predict(aug_data['image'])
+                else:
+                    # Custom model inference
+                    input_tensor = preprocess_image(Image.fromarray(aug_data['image']))
+                    self.model.eval()
+                    with torch.no_grad():
+                        output = self.model(input_tensor)
+                        pred = torch.sigmoid(output).cpu().numpy()[0, 0]
+                
+                # Reverse transform to align with original image
+                pred = self.tta.reverse_transform(
+                    pred, 
+                    aug_data['scale'], 
+                    aug_data['flipped'],
+                    aug_data['original_size']
+                )
+                predictions.append(pred)
             
+            # Calculate mean and variance across TTA predictions
             predictions = np.array(predictions)
-            mean_pred = np.mean(predictions, axis=0)[0, 0]
-            variance = np.var(predictions, axis=0)[0, 0]
+            mean_pred = np.mean(predictions, axis=0)
+            variance = np.var(predictions, axis=0)
+        else:
+            # Single prediction without TTA
+            if self.use_wrapper:
+                mean_pred = self.model.predict(image)
+            else:
+                input_tensor = preprocess_image(Image.fromarray(image))
+                self.model.eval()
+                with torch.no_grad():
+                    output = self.model(input_tensor)
+                    mean_pred = torch.sigmoid(output).cpu().numpy()[0, 0]
+            variance = np.zeros_like(mean_pred)
         
         # Calculate Confidence Score
         confidence_map = mean_pred * (1 - variance)
@@ -81,47 +157,10 @@ class InferenceService:
             "stats": {
                 "mean_variance": float(np.mean(variance)),
                 "max_confidence": float(np.max(confidence_map)),
+                "n_augmentations": len(self.tta.scales) * len(self.tta.flips) if use_tta else 1
             }
         }
 
     def predict_simple(self, image_file):
-        """
-        Single forward pass inference (faster, no uncertainty).
-        
-        Pipeline:
-        1. Input Image → Preprocess (resize, normalize)
-        2. Forward Pass → Segmentation Head (U-Net) → Raw Logits
-        3. Sigmoid → Pixel-wise Probabilities (0-1)
-        4. Generate Heatmap Visualization
-        
-        Returns:
-            - heatmapUrl: path to saved heatmap
-            - score: mean probability (confidence)
-            - probability_map: raw numpy array of probabilities
-        """
-        # 1. Preprocess input image
-        input_tensor = preprocess_image(image_file)  # Shape: (1, 3, 256, 256)
-        
-        # 2. Forward pass through segmentation head
-        self.model.eval()  # Disable dropout for deterministic output
-        with torch.no_grad():
-            logits = self.model(input_tensor)  # Shape: (1, 1, 256, 256)
-            
-            # 3. Apply sigmoid for pixel-wise probabilities
-            probabilities = torch.sigmoid(logits)  # Range: 0.0 - 1.0
-        
-        # Convert to numpy for visualization
-        prob_map = probabilities.cpu().numpy()[0, 0]  # Shape: (256, 256)
-        
-        # 4. Generate heatmap from probability map
-        heatmap_path = generate_heatmap(prob_map)
-        
-        # Calculate global confidence score (mean of all probabilities)
-        global_score = float(np.mean(prob_map))
-        
-        return {
-            "score": global_score,
-            "heatmapUrl": heatmap_path,
-            "probability_map": prob_map  # Raw array if needed for further processing
-        }
-
+        """Single forward pass inference (no TTA)."""
+        return self.predict(image_file, use_tta=False)
