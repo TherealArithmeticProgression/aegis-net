@@ -1,0 +1,13 @@
+{
+  "name": "landing-zone-ai-root",
+  "private": true,
+  "scripts": {
+    "start:all": "concurrently \"npm run start:server\" \"npm run start:client\" \"npm run start:python\"",
+    "start:server": "cd server && npm run dev",
+    "start:client": "cd client && npm run dev",
+    "start:python": "cd python-ai && python app.py"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}
